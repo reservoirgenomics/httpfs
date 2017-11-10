@@ -27,24 +27,48 @@ class HttpFs(LoggingMixIn, Operations):
         self.cleanup_thread.start()
 
     def getattr(self, path, fh=None):
+        #logging.info("getattr: {}".format(path))
+
+        if path in self.files:
+            return self.files[path]['attr']
+
         if path.endswith('..'):
             url = '%s:/%s' % (self.schema, path[:-2])
-            r = requests.get(url)
-            if r.status_code == 200:
-                content = r.content
-                attr = dict(st_mode=(S_IFREG | 0o644), st_nlink=1,
-                            st_size=len(content), st_ctime=time(), st_mtime=time(),
-                            st_atime=time())
-                self.files[path] = dict(time=time(), attr=attr, content=content)
-                return attr
-            else:
-                raise FuseOSError(ENOENT)
+            #headers={'Range': 'bytes=0-1000'}
+            logging.info("attr url: {}".format(url))
+            head = requests.head(url)
+            logging.info("head: {}".format(head.headers))
+            #headers={'Range': 'bytes=0-1000'}
+            #r = requests.get(url, headers=headers)
+            #logging.info("status_code: {}".format(r.status_code))
+                #content = r.content
+            attr = dict(st_mode=(S_IFREG | 0o644), st_nlink=1,
+                        st_size=int(head.headers['Content-Length']),
+                        st_ctime=time(), st_mtime=time(),
+                        st_atime=time())
+            self.files[path] = dict(time=time(), attr=attr)
+            return attr
         else:
             return dict(st_mode=(S_IFDIR | 0o555), st_nlink=2)
 
     def read(self, path, size, offset, fh):
+        logging.info("path: {}".format(path))
+
+        url = '%s:/%s' % (self.schema, path[:-2])
+        logging.info("read url: {}".format(url))
+
+
         if self.files[path]:
-            return self.files[path]['content'][offset:offset + size]
+            headers={'Range': 'bytes={}-{}'.format(offset,offset+size-1)}
+            logging.info("sending request")
+            t1 = time()
+            r = requests.get(url, headers=headers)
+            t2 = time()
+            #logging.info("received request: {}".format(r.status_code))
+            #return r.content
+            logging.info('content: {} time: {}'.format(len(r.content), t2 - t1))
+            return r.content
+            #return self.files[path]['content'][offset:offset + size]
         raise FuseOSError(EIO)
 
     def destroy(self, path):
@@ -56,7 +80,8 @@ class HttpFs(LoggingMixIn, Operations):
         self.files = {k: v for k, v in self.files.items() if now - v['time'] < CLEANUP_EXPIRED}
         num_files_after = len(self.files)
         if num_files_before != num_files_after:
-            logging.debug('Truncated cache from %d to %d files' % (num_files_before, num_files_after))
+            #logging.debug('Truncated cache from %d to %d files' % (num_files_before, num_files_after))
+            pass
         self.cleanup_thread = self._generate_cleanup_thread()
 
     def _generate_cleanup_thread(self, start=True):
@@ -79,7 +104,8 @@ if __name__ == '__main__':
     if schema != 'http' and schema != 'https' and schema != 'ftp':
         print('schema must be one of: http, https, ftp. %s given' % schema)
 
-    logging.getLogger().setLevel(logging.DEBUG)
+    logging.getLogger().setLevel(logging.INFO)
     logging.debug("Starting...")
+    logging.info("starting:")
 
     fuse = FUSE(HttpFs(schema), mountpoint, foreground=True)

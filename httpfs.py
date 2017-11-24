@@ -13,7 +13,6 @@ from fuse import FUSE, FuseOSError, Operations, LoggingMixIn
 CLEANUP_INTERVAL = 60
 CLEANUP_EXPIRED = 60
 
-
 class HttpFs(LoggingMixIn, Operations):
     """A read only http/https/ftp filesystem."""
 
@@ -93,19 +92,31 @@ class HttpFs(LoggingMixIn, Operations):
 
         return cleanup_thread
 
-if __name__ == '__main__':
-    if len(argv) != 3:
-        print('usage: %s <mountpoint> <http|https|ftp>' % argv[0])
-        exit(1)
+import sys
+import argparse
 
-    mountpoint = argv[1]
-    schema = argv[2]
+def main():
+    parser = argparse.ArgumentParser(description="""
+    usage: httpfs <mountpoint> <http|https|ftp>
+""")
 
-    if schema != 'http' and schema != 'https' and schema != 'ftp':
-        print('schema must be one of: http, https, ftp. %s given' % schema)
+    parser.add_argument('mountpoint')
+    parser.add_argument('schema')
+    #parser.add_argument('-o', '--options', default='yo',
+    #					 help="Some option", type='str')
+
+    parser.add_argument('-f', '--foreground', action='store_true', 
+                        default=False,
+    		        help='Run in the foreground')
+
+    args = parser.parse_args()
 
     logging.getLogger().setLevel(logging.INFO)
     logging.debug("Starting...")
     logging.info("starting:")
 
-    fuse = FUSE(HttpFs(schema), mountpoint, foreground=True)
+    print("foreground:", args.foreground)
+    fuse = FUSE(HttpFs(args.schema), args.mountpoint, foreground=args.foreground)
+
+if __name__ == '__main__':
+    main()

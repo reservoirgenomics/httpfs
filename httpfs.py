@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 from errno import EIO, ENOENT
 from stat import S_IFDIR, S_IFREG
-from sys import argv, exit
 from threading import Timer
 from time import time
 import logging
+import sys
 
 from fuse import FUSE, FuseOSError, Operations, LoggingMixIn
 import requests
@@ -111,6 +111,7 @@ class HttpFs(LoggingMixIn, Operations):
 
 
 def main():
+    import argparse
     parser = argparse.ArgumentParser(description="""
     usage: httpfs <mountpoint> <http|https|ftp>
 """)
@@ -135,7 +136,5 @@ def main():
 
 
 if __name__ == '__main__':
-    import sys
-    import argparse
     main()
 

@@ -3,15 +3,48 @@ from errno import EIO, ENOENT
 from stat import S_IFDIR, S_IFREG
 from threading import Timer
 from time import time
+import functools as ft
 import logging
+import os
 import sys
 
 from fuse import FUSE, FuseOSError, Operations, LoggingMixIn
 import requests
 
+BLOCK_SIZE = 2 ** 18
 
 CLEANUP_INTERVAL = 60
 CLEANUP_EXPIRED = 60
+
+DISK_CACHE_SIZE_ENV = 'HTTPFS_DISK_CACHE_SIZE'
+DISK_CACHE_DIR_ENV = 'HTTPFS_DISK_CACHE_DIR'
+
+import collections
+import diskcache as dc
+
+class LRUCache:
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.cache = collections.OrderedDict()
+
+    def __getitem__(self, key):
+        value = self.cache.pop(key)
+        self.cache[key] = value
+        return value
+
+    def __setitem__(self, key, value):
+        try:
+            self.cache.pop(key)
+        except KeyError:
+            if len(self.cache) >= self.capacity:
+                self.cache.popitem(last=False)
+        self.cache[key] = value
+
+    def __contains__(self, key):
+        return key in self.cache
+
+    def __len__(self):
+        return len(self.cache)
 
 
 class HttpFs(LoggingMixIn, Operations):
@@ -23,6 +56,24 @@ class HttpFs(LoggingMixIn, Operations):
         self.schema = _schema
         self.files = dict()
         self.cleanup_thread = self._generate_cleanup_thread(start=False)
+        self.lru_cache = LRUCache(capacity=400)
+
+        size_limit = 2**30 # 1Gb default size limit
+        cache_dir = '/tmp/diskcache'
+        
+
+        if DISK_CACHE_SIZE_ENV in os.environ:
+            print("setting max size:", int(os.environ[DISK_CACHE_SIZE_ENV]))
+            size_limit=int(os.environ[DISK_CACHE_SIZE_ENV])
+                
+        if DISK_CACHE_DIR_ENV in os.environ:
+            print("setting cache directory:", os.environ[DISK_CACHE_DIR_ENV])
+            cache_dir = os.environ[DISK_CACHE_DIR_ENV]
+
+        self.disk_cache = dc.Cache(cache_dir, size_limit)
+
+        self.lru_hits = 0
+        self.lru_misses = 0
 
     def init(self, path):
         self.cleanup_thread.start()
@@ -36,10 +87,10 @@ class HttpFs(LoggingMixIn, Operations):
         elif path.endswith('..'):
             url = '{}:/{}'.format(self.schema, path[:-2])
             
-            logging.info("attr url: {}".format(url))
+            # logging.info("attr url: {}".format(url))
             head = requests.head(url, allow_redirects=True)
-            logging.info("head: {}".format(head.headers))
-            logging.info("status_code: {}".format(head.status_code))
+            # logging.info("head: {}".format(head.headers))
+            # logging.info("status_code: {}".format(head.status_code))
 
             attr = dict(
                 st_mode=(S_IFREG | 0o644), 
@@ -59,27 +110,50 @@ class HttpFs(LoggingMixIn, Operations):
 
     def read(self, path, size, offset, fh):
         #logging.info("read path: {}".format(path))
-
         if path in self.files:
             url = '{}:/{}'.format(self.schema, path[:-2])
             logging.info("read url: {}".format(url))
-
-            headers = {
-                'Range': 'bytes={}-{}'.format(offset, offset + size - 1)
-            }
-            #logging.info("sending request")
-            #logging.info(url)
-            #logging.info(headers)
+            logging.info("offset: {} - {} block: {}".format(offset, offset + size - 1, offset // 2 ** 18))
+            output = [0 for i in range(size)]
 
             t1 = time()
-            r = requests.get(url, headers=headers)
+
+            # nothing fetched yet
+            last_fetched = -1
+            curr_start = offset
+
+            while last_fetched < offset + size:
+                #print('curr_start', curr_start)
+                block_num = curr_start // BLOCK_SIZE
+                block_start = BLOCK_SIZE * (curr_start // BLOCK_SIZE)
+
+                #print("block_num:", block_num, "block_start:", block_start)
+                block_data = self.get_block(url, block_num)
+
+                data_start = curr_start - (curr_start // BLOCK_SIZE) * BLOCK_SIZE
+                data_end = min(BLOCK_SIZE, offset + size - block_start)
+
+                data = block_data[data_start:data_end]
+
+                #print("data_start:", data_start, data_end, data_end - data_start)
+                for (j,d) in enumerate(data):
+                    output[curr_start-offset+j] = d
+
+                last_fetched = curr_start + (data_end - data_start)
+                curr_start += (data_end - data_start)
+
             t2 = time()
+
+            # logging.info("sending request")
+            # logging.info(url)
+            # logging.info(headers)
+            logging.info("num hits: {} misses: {}"
+                    .format(self.lru_hits, self.lru_misses))
+
             self.files[path]['time'] = t2  # extend life of cache entry
 
-            logging.info("status code: {}".format(r.status_code))            
-            logging.info("content: {}".format(len(r.content)))
-            logging.info("time: {}".format(t2 - t1))
-            return r.content
+            logging.info("time: {:.2f}".format(t2 - t1))
+            return bytes(output)
             
         else:
             logging.info("file not found")
@@ -108,6 +182,36 @@ class HttpFs(LoggingMixIn, Operations):
         if start:
             cleanup_thread.start()
         return cleanup_thread
+
+    def get_block(self, url, block_num):
+        '''
+        Get a data block from a URL. Blocks are 256K bytes in size
+
+        Parameters:
+        -----------
+        url: string
+            The url of the file we want to retrieve a block from
+        block_num: int
+            The # of the 256K'th block of this file
+        '''
+        cache_key=  "{}.{}".format(url, block_num)
+        cache = self.disk_cache
+
+        if cache_key in cache:
+            self.lru_hits += 1
+            return cache[cache_key]
+        else:
+            self.lru_misses += 1
+            block_start = block_num * BLOCK_SIZE
+            
+            headers = {
+                'Range': 'bytes={}-{}'.format(block_start, block_start + BLOCK_SIZE - 1)
+            }
+            r = requests.get(url, headers=headers)
+            block_data = r.content
+            cache[cache_key] = block_data
+
+        return block_data
 
 
 def main():

@@ -11,7 +11,7 @@ import sys
 from fuse import FUSE, FuseOSError, Operations, LoggingMixIn
 import requests
 
-BLOCK_SIZE = 2 ** 18
+BLOCK_SIZE = 2 ** 16
 
 CLEANUP_INTERVAL = 60
 CLEANUP_EXPIRED = 60

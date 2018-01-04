@@ -52,28 +52,19 @@ class HttpFs(LoggingMixIn, Operations):
     A read only http/https/ftp filesystem.
 
     """
-    def __init__(self, _schema):
+    def __init__(self, _schema, disk_cache_size=2**30, disk_cache_dir='/tmp/xx', lru_capacity=400):
         self.schema = _schema
         self.files = dict()
         self.cleanup_thread = self._generate_cleanup_thread(start=False)
-        self.lru_cache = LRUCache(capacity=400)
+        self.lru_cache = LRUCache(capacity=lru_capacity)
 
-        size_limit = 2**30 # 1Gb default size limit
-        cache_dir = '/tmp/diskcache'
-        
-
-        if DISK_CACHE_SIZE_ENV in os.environ:
-            print("setting max size:", int(os.environ[DISK_CACHE_SIZE_ENV]))
-            size_limit=int(os.environ[DISK_CACHE_SIZE_ENV])
-                
-        if DISK_CACHE_DIR_ENV in os.environ:
-            print("setting cache directory:", os.environ[DISK_CACHE_DIR_ENV])
-            cache_dir = os.environ[DISK_CACHE_DIR_ENV]
-
-        self.disk_cache = dc.Cache(cache_dir, size_limit)
+        self.disk_cache = dc.Cache(disk_cache_dir, disk_cache_size)
 
         self.lru_hits = 0
         self.lru_misses = 0
+
+        self.disk_hits = 0
+        self.disk_misses = 0
 
     def init(self, path):
         self.cleanup_thread.start()
@@ -147,8 +138,8 @@ class HttpFs(LoggingMixIn, Operations):
             # logging.info("sending request")
             # logging.info(url)
             # logging.info(headers)
-            logging.info("num hits: {} misses: {}"
-                    .format(self.lru_hits, self.lru_misses))
+            logging.info("lru hits: {} lru misses: {} disk hits: {} disk misses: {}"
+                    .format(self.lru_hits, self.lru_misses, self.disk_hits, self.disk_misses))
 
             self.files[path]['time'] = t2  # extend life of cache entry
 
@@ -197,19 +188,28 @@ class HttpFs(LoggingMixIn, Operations):
         cache_key=  "{}.{}".format(url, block_num)
         cache = self.disk_cache
 
-        if cache_key in cache:
+        if cache_key in self.lru_cache:
             self.lru_hits += 1
-            return cache[cache_key]
+            return self.lru_cache[cache_key]
         else:
             self.lru_misses += 1
-            block_start = block_num * BLOCK_SIZE
-            
-            headers = {
-                'Range': 'bytes={}-{}'.format(block_start, block_start + BLOCK_SIZE - 1)
-            }
-            r = requests.get(url, headers=headers)
-            block_data = r.content
-            cache[cache_key] = block_data
+
+            if cache_key in self.disk_cache:
+                self.disk_hits += 1
+                block_data = self.disk_cache[cache_key]
+                self.lru_cache[cache_key] = block_data
+                return block_data
+            else:
+                self.disk_misses += 1
+                block_start = block_num * BLOCK_SIZE
+                
+                headers = {
+                    'Range': 'bytes={}-{}'.format(block_start, block_start + BLOCK_SIZE - 1)
+                }
+                r = requests.get(url, headers=headers)
+                block_data = r.content
+                self.lru_cache[cache_key] = block_data
+                self.disk_cache[cache_key] = block_data
 
         return block_data
 
@@ -226,6 +226,14 @@ def main():
         action='store_true', 
         default=False,
     	help='Run in the foreground')
+
+    parser.add_argument(
+        '--disk-cache-size', default=2**30, type=int)
+    parser.add_argument(
+        '--disk-cache-dir', default='/tmp/xx')
+    parser.add_argument(
+        '--lru-capacity', default=400, type=int)
+
     args = vars(parser.parse_args())
 
     logging.getLogger().setLevel(logging.INFO)
@@ -233,7 +241,11 @@ def main():
     logging.info("foreground: {}".format(args['foreground']))
     
     fuse = FUSE(
-        HttpFs(args['schema']), 
+        HttpFs(args['schema'],
+               disk_cache_size=args['disk_cache_size'],
+               disk_cache_dir=args['disk_cache_dir'],
+               lru_capacity=args['lru_capacity']
+            ), 
         args['mountpoint'], 
         foreground=args['foreground']
     )

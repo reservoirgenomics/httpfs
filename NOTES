@@ -1,0 +1,50 @@
+# Timing
+
+In the log-to-location repo: 478 tile requests
+
+Using 32K blocks:
+
+INFO:root:num cached: 334 hits: 417 misses: 334
+
+6 minutes 40 seconds
+
+Using 64K blocks:
+
+time ( tail -n 2000 data/access.log | grep -v info | python scripts/session_to_tiles.py | grep OHJakQICQD6gTD7skx4EWA | awk '{ print $3, $4}' | awk '{ print "http://127.0.0.1:8000/api/v1/tiles/?d=IzH9CHkqQ0SWLvxYw6yOSg." $1 "." $2 "&d=Np4f8VpVQmGArYWbaIQWAA." $1 "." $2}' | xargs -n 1 -I {} curl {} > /dev/null )
+
+INFO:root:num cached: 211 hits: 423 misses: 211
+
+5 minutes 46 seconds
+
+Using 128K blocks:
+
+INFO:root:num cached: 101 hits: 386 misses: 101
+5 minutes 9 seconds
+
+#### Using DiskCache
+
+Using head -n 200
+
+Using 32K blocks:
+
+Cache size: 5.0M
+Time: 2m 34s
+INFO:root:num hits: 102 misses: 82
+
+Using 64K blocks:
+
+Cache size: 5.7M
+Time: 1m 32seconds
+INFO:root:num hits: 72 misses: 63
+
+Using 128K blocks
+
+Cache size: 5.7M
+Time: 2m 29s
+INFO:root:num hits: 80 misses: 45
+
+Using 256K blocks
+
+Cache size: 9.3M
+Time: 1m 32seconds
+INFO:root:num hits: 79 misses: 33
